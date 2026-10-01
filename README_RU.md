@@ -57,6 +57,21 @@ authHubClient.onEvent((payload) => {
 });
 ```
 
+## Кастомизация токенов
+
+Страница хаба из пакета — отправная точка: скопируйте её и подстройте под свой API.
+
+**В `auth-hub.html` (хаб):**
+
+- Меняйте извлечение access из ответа refresh (`accessFrom`). По умолчанию поддерживаются строка, `{ access }` и `{ data: { access } }`.
+- При необходимости меняйте `fetch` для refresh/logout (headers, method, body).
+- В postMessage-ответе на refresh по-прежнему возвращайте `{ access: string }`, чтобы `AuthHubClient.refresh()` оставался совместимым.
+
+**В host SPA (клиент):**
+
+- После `refresh()` сохраняйте access сами (cookie, memory, свой store). `accessToken` у `AuthHubClient` нужен только чтобы знать, какой ключ чистить при logout через `clearLocalSession()`.
+- После sign-in / на `login` вызывайте `notifyLogin()`, если другим вкладкам нужно перепроверить сессию.
+
 ## Протокол
 
 Канал: `auth-hub`

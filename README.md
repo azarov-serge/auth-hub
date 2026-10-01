@@ -57,6 +57,21 @@ authHubClient.onEvent((payload) => {
 });
 ```
 
+## Customizing tokens
+
+The packaged hub page is a starting point — copy it and adapt to your API.
+
+**In `auth-hub.html` (hub):**
+
+- Change how the access token is read from the refresh response (`accessFrom`). Defaults cover a bare string, `{ access }`, and `{ data: { access } }`.
+- Adjust `fetch` for refresh/logout (headers, method, body) if your backend differs.
+- Keep returning `{ access: string }` in the postMessage refresh payload so `AuthHubClient.refresh()` stays compatible.
+
+**In the host SPA (client):**
+
+- Persist the access token yourself after `refresh()` (cookie, memory, your store). `accessToken` on `AuthHubClient` only tells the client which key to clear on logout via `clearLocalSession()`.
+- On `login` / after sign-in, call `notifyLogin()` if other tabs should re-check the session.
+
 ## Protocol
 
 Channel: `auth-hub`
