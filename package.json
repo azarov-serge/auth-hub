@@ -1,0 +1,39 @@
+{
+  "name": "auth-hub",
+  "version": "0.1.0",
+  "description": "Hidden iframe auth hub: cross-origin refresh mutex (Web Locks), logout/login fan-out (BroadcastChannel), postMessage client",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./auth-hub.html": "./public/auth-hub.html"
+  },
+  "files": [
+    "dist",
+    "public"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "auth",
+    "iframe",
+    "refresh",
+    "web-locks",
+    "broadcastchannel",
+    "sso",
+    "cross-origin"
+  ],
+  "devDependencies": {
+    "typescript": "5.1.6"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

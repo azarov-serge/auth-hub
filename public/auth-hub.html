@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>auth-hub</title>
+  </head>
+  <body>
+    <!--
+      Hidden iframe page (AuthHubClient). Mutex refresh + login/logout fan-out.
+
+      Query: apiBase (required), syncLogout, refreshPath (required), logoutPath (required), parents
+
+      → { channel, id, type: "refresh"|"logout"|"notifyLogin" }
+      ← { channel, id, type, ok, payload?, error? }
+      ← { channel, type: "event", payload: { command: "ready"|"logout"|"login" } }
+    -->
+    <script>
+      const CHANNEL = "auth-hub";
+      const LOCK_NAME = "auth-hub-refresh";
+
+      // Iframe heaps are not shared across tabs; Web Locks are shared on the hub origin.
+      // After refresh, cache access in localStorage (TTL) so the next iframe under the
+      // same lock can return the same token without a second POST /refresh.
+      // sessionStorage is not suitable — it is not shared across tabs.
+      const CACHE_ACCESS = "auth-hub-cache-access";
+      const CACHE_AT = "auth-hub-cache-at";
+      const CACHE_TTL_MS = 5_000;
+
+      const params = new URLSearchParams(location.search);
+      const apiBaseRaw = params.get("apiBase");
+      if (!apiBaseRaw) {
+        throw new Error("auth-hub: apiBase is required");
+      }
+      const apiBase = apiBaseRaw.replace(/\/$/, "");
+      // false — tabs stay independent (learn via 401); true — fan-out login/logout.
+      const syncLogout = params.get("syncLogout") !== "false";
+      const refreshPath = params.get("refreshPath");
+      const logoutPath = params.get("logoutPath");
+      if (!refreshPath || !logoutPath) {
+        throw new Error("auth-hub: refreshPath and logoutPath are required");
+      }
+      // Parent SPA origin allowlist. Without `parents` — hub page origin only.
+      const parents = (params.get("parents") || location.origin)
+        .split(",")
+        .map((parent) => parent.trim())
+        .filter(Boolean);
+
+      const broadcastChannel = new BroadcastChannel("auth-hub-sync");
+
+      const url = (path) => apiBase + (path.startsWith("/") ? path : `/${path}`);
+
+      // Reply to the SPA request (AuthHubClient waits for the same id).
+      // origin — exact sender origin, never "*".
+      const reply = ({ source, origin, id, type, ok, payload, error }) => {
+        source?.postMessage({ channel: CHANNEL, id, type, ok, payload, error }, origin);
+      };
+
+      // Push event iframe → parent (no id). Send to each origin in parents:
+      // postMessage requires an exact targetOrigin; parent may be another subdomain.
+      const emit = (command) => {
+        if (!parent || parent === window) {
+          return;
+        }
+        for (const origin of parents) {
+          parent.postMessage({ channel: CHANNEL, type: "event", payload: { command } }, origin);
+        }
+      };
+
+      const readCache = () => {
+        const access = localStorage.getItem(CACHE_ACCESS);
+        const at = Number(localStorage.getItem(CACHE_AT) || 0);
+        if (!access || !at || Date.now() - at > CACHE_TTL_MS) {
+          return null;
+        }
+        return access;
+      };
+
+      const writeCache = (access) => {
+        localStorage.setItem(CACHE_ACCESS, access);
+        localStorage.setItem(CACHE_AT, String(Date.now()));
+      };
+
+      const clearCache = () => {
+        localStorage.removeItem(CACHE_ACCESS);
+        localStorage.removeItem(CACHE_AT);
+      };
+
+      // Backend may return a string, { access }, or { data: { access } }.
+      const accessFrom = (body) => {
+        const data = body && typeof body === "object" ? (body.data ?? body) : body;
+        if (typeof data === "string") {
+          return data;
+        }
+        return data?.access || "";
+      };
+
+      const refresh = () => {
+        // Cache read/write only inside the lock — otherwise two tabs both hit the network.
+        const run = async () => {
+          const cached = readCache();
+          if (cached) {
+            return { access: cached };
+          }
+
+          const res = await fetch(url(refreshPath), {
+            method: "POST",
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          });
+
+          if (!res.ok) {
+            clearCache();
+            throw new Error(`refresh failed: ${res.status}`);
+          }
+
+          const body = await res.json().catch(() => null);
+          const access = accessFrom(body);
+
+          if (!access) {
+            clearCache();
+            throw new Error("refresh failed: empty access");
+          }
+          writeCache(access);
+          return { access };
+        };
+
+        return navigator.locks ? navigator.locks.request(LOCK_NAME, run) : run();
+      };
+
+      const logout = async () => {
+        clearCache();
+        try {
+          await fetch(url(logoutPath), {
+            method: "POST",
+            credentials: "include",
+            headers: { Accept: "application/json" },
+          });
+        } catch {
+          // Network/cookie may already be dead — local logout is still required.
+        }
+        if (syncLogout) {
+          broadcastChannel.postMessage({ type: "logout" });
+        }
+        emit("logout");
+      };
+
+      // After SPA login: signal other tabs to re-check the session.
+      // Do not emit to own parent — it is already signed in; BC reaches other iframes.
+      const notifyLogin = () => {
+        if (syncLogout) {
+          broadcastChannel.postMessage({ type: "login" });
+        }
+      };
+
+      broadcastChannel.addEventListener("message", (event) => {
+        if (event.data?.type === "logout") {
+          clearCache();
+          emit("logout");
+        } else if (event.data?.type === "login") {
+          emit("login");
+        }
+      });
+
+      addEventListener("message", async (event) => {
+        if (!parents.includes(event.origin)) {
+          return;
+        }
+        const data = event.data;
+        if (!data || data.channel !== CHANNEL || !data.id) {
+          return;
+        }
+
+        const { id, type } = data;
+        const to = { source: event.source, origin: event.origin, id, type };
+        try {
+          if (type === "refresh") {
+            const accessToken = await refresh();
+            reply({ ...to, ok: true, payload: accessToken });
+          } else if (type === "logout") {
+            await logout();
+            reply({ ...to, ok: true, payload: { loggedOut: true } });
+          } else if (type === "notifyLogin") {
+            notifyLogin();
+            reply({ ...to, ok: true, payload: { notified: true } });
+          } else {
+            reply({ ...to, ok: false, error: `unknown type: ${type}` });
+          }
+        } catch (error) {
+          reply({
+            ...to,
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+
+      emit("ready");
+    </script>
+  </body>
+</html>
