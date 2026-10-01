@@ -1,5 +1,7 @@
 # auth-hub
 
+[English](README.md) | [Русский](README_RU.md)
+
 Hidden iframe auth hub for shared HttpOnly refresh cookies across sibling subdomains.
 
 - **Web Locks** — one network `/refresh` across tabs/SPAs on the hub origin

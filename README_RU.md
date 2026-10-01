@@ -1,5 +1,7 @@
 # auth-hub
 
+[English](README.md) | [Русский](README_RU.md)
+
 Скрытый iframe auth hub для общих HttpOnly refresh-cookie между sibling-поддоменами.
 
 - **Web Locks** — один сетевой `/refresh` между вкладками/SPA на origin хаба
