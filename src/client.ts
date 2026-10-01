@@ -33,8 +33,8 @@ export type AuthHubClientOptions = {
 };
 
 export type BuildAuthHubFrameUrlOptions = {
-  /** Hub page URL (path or absolute). Default: `/auth-hub.html`. */
-  frameUrl?: string;
+  /** Hub page URL (path or absolute). */
+  frameUrl: string;
   /** API base for credentialed fetch inside the hub. Required by the hub page. */
   apiBase: string;
   /** Fan-out login/logout via BroadcastChannel inside the hub. Default: true. */
@@ -70,17 +70,29 @@ type Pending = {
 
 export type AuthHubEventListener = (payload: AuthHubEventPayload) => void;
 
+const requireNonEmpty = (value: string | undefined, name: string): string => {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    throw new Error(`buildAuthHubFrameUrl: ${name} is required`);
+  }
+  return trimmed;
+};
+
 /** Builds iframe URL with query config expected by `auth-hub.html`. */
 export const buildAuthHubFrameUrl = (
   options: BuildAuthHubFrameUrlOptions
 ): string => {
-  const raw = options.frameUrl ?? "/auth-hub.html";
-  const url = new URL(raw, window.location.href);
-  url.searchParams.set("apiBase", options.apiBase);
+  const frameUrl = requireNonEmpty(options.frameUrl, "frameUrl");
+  const apiBase = requireNonEmpty(options.apiBase, "apiBase");
+  const refreshPath = requireNonEmpty(options.refreshPath, "refreshPath");
+  const logoutPath = requireNonEmpty(options.logoutPath, "logoutPath");
+
+  const url = new URL(frameUrl, window.location.href);
+  url.searchParams.set("apiBase", apiBase);
   url.searchParams.set("syncLogout", String(options.syncLogout ?? true));
   url.searchParams.set("parents", options.parents ?? window.location.origin);
-  url.searchParams.set("refreshPath", options.refreshPath);
-  url.searchParams.set("logoutPath", options.logoutPath);
+  url.searchParams.set("refreshPath", refreshPath);
+  url.searchParams.set("logoutPath", logoutPath);
   return url.toString();
 };
 
