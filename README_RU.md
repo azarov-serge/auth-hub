@@ -20,7 +20,14 @@ npm install auth-hub
 cp node_modules/auth-hub/public/auth-hub.html public/auth-hub.html
 ```
 
-Рекомендация для production: отдавайте `auth-hub.html` с общего origin, например `https://auth.corp.com/auth-hub.html`.
+## Хостинг
+
+Два типичных варианта:
+
+1. **Общий auth-origin** — отдельный поддомен, хаб как entry page, например `https://auth.corp.com/index.html`. Sibling-приложения (`app.corp.com`, `admin.corp.com`, …) грузят этот iframe. Удобно, когда refresh-cookie на `.corp.com` и несколько SPA делят один хаб.
+2. **Тот же site / origin приложения** — хаб рядом со SPA, например `https://corp.com/auth-hub.html` (или относительный `/auth-hub.html`). Проще для одного product-origin.
+
+В production при нескольких sibling-поддоменах предпочтителен вариант (1): один HttpOnly refresh-cookie и один mutex на refresh.
 
 ## Использование
 
@@ -30,7 +37,9 @@ import { AuthHubClient, buildAuthHubFrameUrl } from 'auth-hub';
 const authHubClient = new AuthHubClient({
   accessToken: { key: 'access', storage: 'sessionStorage' },
   frameUrl: buildAuthHubFrameUrl({
-    frameUrl: '/auth-hub.html', // или https://auth.corp.com/auth-hub.html
+    // (1) https://auth.corp.com/index.html
+    // (2) https://corp.com/auth-hub.html  или  '/auth-hub.html'
+    frameUrl: 'https://auth.corp.com/index.html',
     apiBase: 'https://api.corp.com',
     syncLogout: true,
     parents: window.location.origin,

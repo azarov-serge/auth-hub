@@ -20,7 +20,14 @@ Copy the hub page into your static assets (or host it on a shared auth origin):
 cp node_modules/auth-hub/public/auth-hub.html public/auth-hub.html
 ```
 
-Production recommendation: serve `auth-hub.html` from a shared origin, e.g. `https://auth.corp.com/auth-hub.html`.
+## Hosting
+
+Two common setups:
+
+1. **Shared auth origin** — dedicate a subdomain and serve the hub as its entry page, e.g. `https://auth.corp.com/index.html`. Sibling apps (`app.corp.com`, `admin.corp.com`, …) load this iframe. Best when refresh cookies are scoped to `.corp.com` and many SPAs share one hub.
+2. **Same site / app origin** — put the hub next to the SPA, e.g. `https://corp.com/auth-hub.html` (or a relative `/auth-hub.html`). Simpler for a single product origin.
+
+Prefer (1) in production when several sibling subdomains must share one HttpOnly refresh cookie and one refresh mutex.
 
 ## Usage
 
@@ -30,7 +37,9 @@ import { AuthHubClient, buildAuthHubFrameUrl } from 'auth-hub';
 const authHubClient = new AuthHubClient({
   accessToken: { key: 'access', storage: 'sessionStorage' },
   frameUrl: buildAuthHubFrameUrl({
-    frameUrl: '/auth-hub.html', // or https://auth.corp.com/auth-hub.html
+    // (1) https://auth.corp.com/index.html
+    // (2) https://corp.com/auth-hub.html  or  '/auth-hub.html'
+    frameUrl: 'https://auth.corp.com/index.html',
     apiBase: 'https://api.corp.com',
     syncLogout: true,
     parents: window.location.origin,
