@@ -4,9 +4,9 @@
 
 Hidden iframe auth hub for shared HttpOnly refresh cookies across sibling subdomains.
 
-- **Web Locks** — one network `/refresh` across tabs/SPAs on the hub origin
-- **BroadcastChannel** — optional login/logout fan-out
-- **postMessage client** — `AuthHubClient` for the host SPA
+- **Web Locks** (+ localStorage mutex fallback) — one network `/refresh` across tabs/SPAs on the hub origin
+- **BroadcastChannel** — login/logout fan-out and access-token sync across hub iframes
+- **postMessage client** — `AuthHubClient` for the host SPA (single-flight `refresh()`)
 
 ## Install
 
@@ -45,6 +45,8 @@ const authHubClient = new AuthHubClient({
     parents: window.location.origin,
     refreshPath: '/token/v1/refresh',
     logoutPath: '/auth/v1/logout',
+    // optional; hub default is 120000
+    // cacheTtlMs: 120_000,
   }),
 });
 
@@ -56,6 +58,22 @@ authHubClient.onEvent((payload) => {
   }
 });
 ```
+
+## Multi-tab refresh
+
+Opening many tabs at once must not trigger parallel network `/refresh` calls when the backend **rotates** the refresh cookie: a second refresh can return 401, and a naive SPA that then calls server `logout` will kill the session for every tab.
+
+The hub mitigates this:
+
+| Mechanism | Behavior |
+| --- | --- |
+| Cache TTL | Default **120s** (`cacheTtlMs`, min 5s). Short TTL + rotation caused spurious second refreshes. |
+| Mutex | `navigator.locks` when available; otherwise a localStorage mutex. |
+| BC access sync | After a successful refresh, other hub iframes get `{ type: "access" }` and reuse the token. |
+| Error fallback | If the network refresh fails but another tab already wrote the cache, return that access. |
+| Client single-flight | Concurrent `refresh()` in the same tab share one in-flight promise. |
+
+**Host SPA rule:** a failed refresh must **not** call server logout. Clear local access (`clearLocalSession`) and redirect to login if needed. Call hub `logout()` / `authManager.signOut()` only for an **explicit** user sign-out.
 
 ## Customizing tokens
 
@@ -82,7 +100,9 @@ Channel: `auth-hub`
 ← { channel, type: "event", payload: { command: "ready"|"logout"|"login" } }
 ```
 
-Query on the hub page: `apiBase`, `syncLogout`, `refreshPath`, `logoutPath`, `parents`.
+Hub BroadcastChannel (`auth-hub-sync`): `login` / `logout` fan-out, plus `access` to sync the cached token across hub iframes.
+
+Query on the hub page: `apiBase`, `syncLogout`, `refreshPath`, `logoutPath`, `parents`, `cacheTtlMs` (optional, default `120000`).
 
 ## License
 

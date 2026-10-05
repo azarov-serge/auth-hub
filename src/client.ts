@@ -43,6 +43,12 @@ export type BuildAuthHubFrameUrlOptions = {
   parents?: string;
   refreshPath: string;
   logoutPath: string;
+  /**
+   * How long a successful refresh may be reused across tabs (hub localStorage).
+   * Keep ≥ burst of new-tab bootstraps; short TTL + rotation ⇒ spurious 401/logout.
+   * Default in hub HTML: 120000.
+   */
+  cacheTtlMs?: number;
 };
 
 /** Response to a SPA request (same `id`). */
@@ -93,6 +99,9 @@ export const buildAuthHubFrameUrl = (
   url.searchParams.set("parents", options.parents ?? window.location.origin);
   url.searchParams.set("refreshPath", refreshPath);
   url.searchParams.set("logoutPath", logoutPath);
+  if (options.cacheTtlMs != null) {
+    url.searchParams.set("cacheTtlMs", String(options.cacheTtlMs));
+  }
   return url.toString();
 };
 
@@ -108,6 +117,8 @@ export class AuthHubClient {
   private readonly listeners = new Set<AuthHubEventListener>();
   private ready: Promise<void> | null = null;
   private resolveReady: (() => void) | null = null;
+  /** Coalesce concurrent refresh() from the same tab (bootstrap + 401 interceptor). */
+  private refreshInflight: Promise<AuthHubRefreshPayload> | null = null;
 
   constructor(options: AuthHubClientOptions) {
     this.accessToken = options.accessToken;
@@ -196,12 +207,24 @@ export class AuthHubClient {
   }
 
   /** Mutex and POST refresh run inside the iframe. Host app persists the access token. */
-  async refresh(): Promise<AuthHubRefreshPayload> {
-    const payload = (await this.call("refresh")) as AuthHubRefreshPayload;
-    if (!payload?.access) {
-      throw new Error("AuthHubClient: empty access");
+  refresh(): Promise<AuthHubRefreshPayload> {
+    if (this.refreshInflight) {
+      return this.refreshInflight;
     }
-    return payload;
+
+    this.refreshInflight = this.call("refresh")
+      .then((raw) => {
+        const payload = raw as AuthHubRefreshPayload;
+        if (!payload?.access) {
+          throw new Error("AuthHubClient: empty access");
+        }
+        return payload;
+      })
+      .finally(() => {
+        this.refreshInflight = null;
+      });
+
+    return this.refreshInflight;
   }
 
   /** POST logout via hub. Always clears local access. */

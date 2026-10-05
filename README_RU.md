@@ -4,9 +4,9 @@
 
 Скрытый iframe auth hub для общих HttpOnly refresh-cookie между sibling-поддоменами.
 
-- **Web Locks** — один сетевой `/refresh` между вкладками/SPA на origin хаба
-- **BroadcastChannel** — опциональный fan-out login/logout
-- **postMessage client** — `AuthHubClient` для host SPA
+- **Web Locks** (+ fallback mutex на localStorage) — один сетевой `/refresh` между вкладками/SPA на origin хаба
+- **BroadcastChannel** — fan-out login/logout и синхронизация access между iframe хаба
+- **postMessage client** — `AuthHubClient` для host SPA (single-flight `refresh()`)
 
 ## Установка
 
@@ -45,6 +45,8 @@ const authHubClient = new AuthHubClient({
     parents: window.location.origin,
     refreshPath: '/token/v1/refresh',
     logoutPath: '/auth/v1/logout',
+    // опционально; в хабе по умолчанию 120000
+    // cacheTtlMs: 120_000,
   }),
 });
 
@@ -56,6 +58,22 @@ authHubClient.onEvent((payload) => {
   }
 });
 ```
+
+## Multi-tab refresh
+
+Пачка вкладок не должна параллельно бить сетевой `/refresh`, если бэкенд **ротирует** refresh-cookie: второй refresh может дать 401, а наивный SPA с серверным `logout` убьёт сессию у всех вкладок.
+
+Хаб это смягчает:
+
+| Механизм | Поведение |
+| --- | --- |
+| Cache TTL | По умолчанию **120с** (`cacheTtlMs`, мин. 5с). Короткий TTL + ротация давали лишний второй refresh. |
+| Mutex | `navigator.locks`, если есть; иначе mutex на localStorage. |
+| BC sync access | После успешного refresh другие iframe хаба получают `{ type: "access" }` и переиспользуют токен. |
+| Fallback при ошибке | Если сетевой refresh упал, но другая вкладка уже записала кеш — вернуть этот access. |
+| Single-flight в клиенте | Параллельные `refresh()` в одной вкладке делят один in-flight promise. |
+
+**Правило для host SPA:** failed refresh **не** должен вызывать серверный logout. Только `clearLocalSession` и при необходимости redirect на login. Hub `logout()` / `authManager.signOut()` — только при **явном** выходе пользователя.
 
 ## Кастомизация токенов
 
@@ -82,7 +100,9 @@ authHubClient.onEvent((payload) => {
 ← { channel, type: "event", payload: { command: "ready"|"logout"|"login" } }
 ```
 
-Query-параметры страницы хаба: `apiBase`, `syncLogout`, `refreshPath`, `logoutPath`, `parents`.
+BroadcastChannel хаба (`auth-hub-sync`): fan-out `login` / `logout`, плюс `access` для синка кеша между iframe хаба.
+
+Query-параметры страницы хаба: `apiBase`, `syncLogout`, `refreshPath`, `logoutPath`, `parents`, `cacheTtlMs` (опционально, по умолчанию `120000`).
 
 ## Лицензия
 

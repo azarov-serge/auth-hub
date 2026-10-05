@@ -8,7 +8,8 @@
     <!--
       Hidden iframe page (AuthHubClient). Mutex refresh + login/logout fan-out.
 
-      Query: apiBase (required), syncLogout, refreshPath (required), logoutPath (required), parents
+      Query: apiBase (required), syncLogout, refreshPath (required), logoutPath (required), parents,
+             cacheTtlMs (optional, default 120000)
 
       → { channel, id, type: "refresh"|"logout"|"notifyLogin" }
       ← { channel, id, type, ok, payload?, error? }
@@ -17,14 +18,17 @@
     <script>
       const CHANNEL = "auth-hub";
       const LOCK_NAME = "auth-hub-refresh";
-
-      // Iframe heaps are not shared across tabs; Web Locks are shared on the hub origin.
-      // After refresh, cache access in localStorage (TTL) so the next iframe under the
-      // same lock can return the same token without a second POST /refresh.
-      // sessionStorage is not suitable — it is not shared across tabs.
       const CACHE_ACCESS = "auth-hub-cache-access";
       const CACHE_AT = "auth-hub-cache-at";
-      const CACHE_TTL_MS = 5_000;
+      const MUTEX_KEY = "auth-hub-refresh-mutex";
+
+      // Shared across hub iframes (tabs). Must outlive a burst of new-tab bootstraps;
+      // short TTL + refresh rotation ⇒ second network /refresh fails.
+      const CACHE_TTL_MS_DEFAULT = 120_000;
+      const CACHE_TTL_MS_MIN = 5_000;
+      const MUTEX_TTL_MS = 15_000;
+      const MUTEX_POLL_MS_MIN = 40;
+      const MUTEX_POLL_MS_JITTER = 40;
 
       const params = new URLSearchParams(location.search);
       const apiBaseRaw = params.get("apiBase");
@@ -32,14 +36,16 @@
         throw new Error("auth-hub: apiBase is required");
       }
       const apiBase = apiBaseRaw.replace(/\/$/, "");
-      // false — tabs stay independent (learn via 401); true — fan-out login/logout.
       const syncLogout = params.get("syncLogout") !== "false";
       const refreshPath = params.get("refreshPath");
       const logoutPath = params.get("logoutPath");
       if (!refreshPath || !logoutPath) {
         throw new Error("auth-hub: refreshPath and logoutPath are required");
       }
-      // Parent SPA origin allowlist. Without `parents` — hub page origin only.
+      const cacheTtlMs = Math.max(
+        CACHE_TTL_MS_MIN,
+        Number(params.get("cacheTtlMs") || CACHE_TTL_MS_DEFAULT) || CACHE_TTL_MS_DEFAULT
+      );
       const parents = (params.get("parents") || location.origin)
         .split(",")
         .map((parent) => parent.trim())
@@ -47,16 +53,16 @@
 
       const broadcastChannel = new BroadcastChannel("auth-hub-sync");
 
+      // Mirror of localStorage for same-tick waiters / storage edge cases.
+      let memoryAccess = null;
+      let memoryAt = 0;
+
       const url = (path) => apiBase + (path.startsWith("/") ? path : `/${path}`);
 
-      // Reply to the SPA request (AuthHubClient waits for the same id).
-      // origin — exact sender origin, never "*".
       const reply = ({ source, origin, id, type, ok, payload, error }) => {
         source?.postMessage({ channel: CHANNEL, id, type, ok, payload, error }, origin);
       };
 
-      // Push event iframe → parent (no id). Send to each origin in parents:
-      // postMessage requires an exact targetOrigin; parent may be another subdomain.
       const emit = (command) => {
         if (!parent || parent === window) {
           return;
@@ -67,25 +73,36 @@
       };
 
       const readCache = () => {
+        if (memoryAccess && memoryAt && Date.now() - memoryAt <= cacheTtlMs) {
+          return memoryAccess;
+        }
         const access = localStorage.getItem(CACHE_ACCESS);
         const at = Number(localStorage.getItem(CACHE_AT) || 0);
-        if (!access || !at || Date.now() - at > CACHE_TTL_MS) {
+        if (!access || !at || Date.now() - at > cacheTtlMs) {
           return null;
         }
+        memoryAccess = access;
+        memoryAt = at;
         return access;
       };
 
       const writeCache = (access) => {
+        const at = Date.now();
+        memoryAccess = access;
+        memoryAt = at;
         localStorage.setItem(CACHE_ACCESS, access);
-        localStorage.setItem(CACHE_AT, String(Date.now()));
+        localStorage.setItem(CACHE_AT, String(at));
+        // Other hub iframes (other tabs) — keep their memory/localStorage in sync.
+        broadcastChannel.postMessage({ type: "access", access, at });
       };
 
       const clearCache = () => {
+        memoryAccess = null;
+        memoryAt = 0;
         localStorage.removeItem(CACHE_ACCESS);
         localStorage.removeItem(CACHE_AT);
       };
 
-      // Backend may return a string, { access }, or { data: { access } }.
       const accessFrom = (body) => {
         const data = body && typeof body === "object" ? (body.data ?? body) : body;
         if (typeof data === "string") {
@@ -95,36 +112,87 @@
       };
 
       const refresh = () => {
-        // Cache read/write only inside the lock — otherwise two tabs both hit the network.
         const run = async () => {
           const cached = readCache();
           if (cached) {
             return { access: cached };
           }
 
-          const res = await fetch(url(refreshPath), {
-            method: "POST",
-            credentials: "include",
-            headers: { Accept: "application/json" },
-          });
+          try {
+            const res = await fetch(url(refreshPath), {
+              method: "POST",
+              credentials: "include",
+              headers: { Accept: "application/json" },
+            });
 
-          if (!res.ok) {
-            clearCache();
-            throw new Error(`refresh failed: ${res.status}`);
+            if (!res.ok) {
+              // Another tab may have written cache while we waited on the lock.
+              const fallback = readCache();
+              if (fallback) {
+                return { access: fallback };
+              }
+              // 401 = session/cookie invalid → drop shared access.
+              // 403 = forbidden, not “logged out” — do not clearCache / do not logout.
+              // Hub never calls logout on failed refresh; parent decides what to do.
+              if (res.status === 401) {
+                clearCache();
+              }
+              throw new Error(`refresh failed: ${res.status}`);
+            }
+
+            const body = await res.json().catch(() => null);
+            const access = accessFrom(body);
+            if (!access) {
+              const fallback = readCache();
+              if (fallback) {
+                return { access: fallback };
+              }
+              clearCache();
+              throw new Error("refresh failed: empty access");
+            }
+            writeCache(access);
+            return { access };
+          } catch (error) {
+            const fallback = readCache();
+            if (fallback) {
+              return { access: fallback };
+            }
+            throw error;
           }
-
-          const body = await res.json().catch(() => null);
-          const access = accessFrom(body);
-
-          if (!access) {
-            clearCache();
-            throw new Error("refresh failed: empty access");
-          }
-          writeCache(access);
-          return { access };
         };
 
-        return navigator.locks ? navigator.locks.request(LOCK_NAME, run) : run();
+        if (navigator.locks) {
+          return navigator.locks.request(LOCK_NAME, run);
+        }
+
+        // Fallback mutex when Web Locks are unavailable (parallel rotation races).
+        const waitMutex = async () => {
+          const started = Date.now();
+          while (Date.now() - started < MUTEX_TTL_MS) {
+            const holder = Number(localStorage.getItem(MUTEX_KEY) || 0);
+            if (!holder || Date.now() - holder > MUTEX_TTL_MS) {
+              localStorage.setItem(MUTEX_KEY, String(Date.now()));
+              return;
+            }
+            await new Promise((r) =>
+              setTimeout(r, MUTEX_POLL_MS_MIN + Math.random() * MUTEX_POLL_MS_JITTER)
+            );
+            const cached = readCache();
+            if (cached) {
+              return "cached";
+            }
+          }
+          return;
+        };
+
+        return waitMutex().then((status) => {
+          if (status === "cached") {
+            return { access: readCache() };
+          }
+          return run().finally(() => {
+            localStorage.removeItem(MUTEX_KEY);
+          });
+        });
       };
 
       const logout = async () => {
@@ -136,7 +204,7 @@
             headers: { Accept: "application/json" },
           });
         } catch {
-          // Network/cookie may already be dead — local logout is still required.
+          /* cookie may already be invalid */
         }
         if (syncLogout) {
           broadcastChannel.postMessage({ type: "logout" });
@@ -144,8 +212,6 @@
         emit("logout");
       };
 
-      // After SPA login: signal other tabs to re-check the session.
-      // Do not emit to own parent — it is already signed in; BC reaches other iframes.
       const notifyLogin = () => {
         if (syncLogout) {
           broadcastChannel.postMessage({ type: "login" });
@@ -153,10 +219,18 @@
       };
 
       broadcastChannel.addEventListener("message", (event) => {
-        if (event.data?.type === "logout") {
+        const data = event.data;
+        if (data?.type === "access" && data.access) {
+          memoryAccess = data.access;
+          memoryAt = Number(data.at) || Date.now();
+          localStorage.setItem(CACHE_ACCESS, data.access);
+          localStorage.setItem(CACHE_AT, String(memoryAt));
+          return;
+        }
+        if (data?.type === "logout") {
           clearCache();
           emit("logout");
-        } else if (event.data?.type === "login") {
+        } else if (data?.type === "login") {
           emit("login");
         }
       });
@@ -174,8 +248,7 @@
         const to = { source: event.source, origin: event.origin, id, type };
         try {
           if (type === "refresh") {
-            const accessToken = await refresh();
-            reply({ ...to, ok: true, payload: accessToken });
+            reply({ ...to, ok: true, payload: await refresh() });
           } else if (type === "logout") {
             await logout();
             reply({ ...to, ok: true, payload: { loggedOut: true } });
