@@ -2,6 +2,8 @@ export {
   AUTH_HUB_CHANNEL,
   AuthHubClient,
   buildAuthHubFrameUrl,
+  isDefinitiveAuthFailure,
+  isTransientHubError,
 } from "./client";
 
 export type {

@@ -6,7 +6,7 @@ Hidden iframe auth hub for shared HttpOnly refresh cookies across sibling subdom
 
 - **Web Locks** (+ localStorage mutex fallback) — one network `/refresh` across tabs/SPAs on the hub origin
 - **BroadcastChannel** — login/logout fan-out and access-token sync across hub iframes
-- **postMessage client** — `AuthHubClient` for the host SPA (single-flight `refresh()`)
+- **postMessage client** — `AuthHubClient` with single-flight `refresh()`, retries, and parent share-cache
 
 ## Install
 
@@ -36,6 +36,8 @@ import { AuthHubClient, buildAuthHubFrameUrl } from 'auth-hub';
 
 const authHubClient = new AuthHubClient({
   accessToken: { key: 'access', storage: 'sessionStorage' },
+  // timeoutMs: 45_000,      // default — many tabs queue iframe HTTP + Web Lock
+  // refreshRetries: 3,      // transient timeout / network only
   frameUrl: buildAuthHubFrameUrl({
     // (1) https://auth.corp.com/index.html
     // (2) https://corp.com/auth-hub.html  or  '/auth-hub.html'
@@ -59,21 +61,27 @@ authHubClient.onEvent((payload) => {
 });
 ```
 
+Helpers for host bootstrap (re-exported): `isTransientHubError`, `isDefinitiveAuthFailure` (401 / empty access). Treat only definitive failures as logged-out; retry or wait on transient timeouts while the cookie is still valid.
+
 ## Multi-tab refresh
 
-Opening many tabs at once must not trigger parallel network `/refresh` calls when the backend **rotates** the refresh cookie: a second refresh can return 401, and a naive SPA that then calls server `logout` will kill the session for every tab.
+Opening many tabs at once stresses two layers: each tab has its own iframe (browser HTTP connection pool) **and** a shared Web Lock on the hub. Bootstrap can time out while the cookie is still alive — that is not a logout.
 
-The hub mitigates this:
+Also, parallel network `/refresh` with cookie **rotation** can return 401 on a second call; a naive SPA that then hits server `logout` kills the session for every tab.
+
+Mitigations:
 
 | Mechanism | Behavior |
 | --- | --- |
-| Cache TTL | Default **120s** (`cacheTtlMs`, min 5s). Short TTL + rotation caused spurious second refreshes. |
+| Hub cache TTL | Default **120s** (`cacheTtlMs`, min 5s). Short TTL + rotation caused spurious second refreshes. |
 | Mutex | `navigator.locks` when available; otherwise a localStorage mutex. |
 | BC access sync | After a successful refresh, other hub iframes get `{ type: "access" }` and reuse the token. |
-| Error fallback | If the network refresh fails but another tab already wrote the cache, return that access. |
+| Hub error fallback | If the network refresh fails but another tab already wrote the hub cache, return that access. |
+| Parent share-cache | Client writes access to parent `localStorage` (`auth-hub-share-*`, **120s**). Sibling tabs can take it **before** their own iframe is ready. |
+| Timeout / retries | Default `timeoutMs` **45s**, `refreshRetries` **3** on transient errors. After hub timeout, iframe is destroyed so `connect()` can remount. |
 | Client single-flight | Concurrent `refresh()` in the same tab share one in-flight promise. |
 
-**Host SPA rule:** a failed refresh must **not** call server logout. Clear local access (`clearLocalSession`) and redirect to login if needed. Call hub `logout()` / `authManager.signOut()` only for an **explicit** user sign-out.
+**Host SPA rule:** a failed refresh must **not** call server logout. Clear local access (`clearLocalSession`) and redirect to login only on definitive auth failure. Call hub `logout()` only for an **explicit** user sign-out.
 
 ## Customizing tokens
 

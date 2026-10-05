@@ -6,7 +6,7 @@
 
 - **Web Locks** (+ fallback mutex на localStorage) — один сетевой `/refresh` между вкладками/SPA на origin хаба
 - **BroadcastChannel** — fan-out login/logout и синхронизация access между iframe хаба
-- **postMessage client** — `AuthHubClient` для host SPA (single-flight `refresh()`)
+- **postMessage client** — `AuthHubClient` с single-flight `refresh()`, retry и parent share-cache
 
 ## Установка
 
@@ -36,6 +36,8 @@ import { AuthHubClient, buildAuthHubFrameUrl } from 'auth-hub';
 
 const authHubClient = new AuthHubClient({
   accessToken: { key: 'access', storage: 'sessionStorage' },
+  // timeoutMs: 45_000,      // по умолчанию — очередь iframe HTTP + Web Lock при многих вкладках
+  // refreshRetries: 3,      // только transient timeout / network
   frameUrl: buildAuthHubFrameUrl({
     // (1) https://auth.corp.com/index.html
     // (2) https://corp.com/auth-hub.html  или  '/auth-hub.html'
@@ -59,21 +61,27 @@ authHubClient.onEvent((payload) => {
 });
 ```
 
+Хелперы для bootstrap (реэкспорт): `isTransientHubError`, `isDefinitiveAuthFailure` (401 / empty access). Logout только на definitive; на transient — retry / ждать, пока cookie ещё жива.
+
 ## Multi-tab refresh
 
-Пачка вкладок не должна параллельно бить сетевой `/refresh`, если бэкенд **ротирует** refresh-cookie: второй refresh может дать 401, а наивный SPA с серверным `logout` убьёт сессию у всех вкладок.
+Пачка вкладок бьёт по двум слоям: у каждой свой iframe (пул HTTP-соединений браузера) **и** общий Web Lock на хабе. Bootstrap может упереться в timeout при живой cookie — это не logout.
 
-Хаб это смягчает:
+Параллельный сетевой `/refresh` при **ротации** cookie может дать 401 на втором вызове; наивный SPA с серверным `logout` убьёт сессию у всех.
+
+Смягчения:
 
 | Механизм | Поведение |
 | --- | --- |
-| Cache TTL | По умолчанию **120с** (`cacheTtlMs`, мин. 5с). Короткий TTL + ротация давали лишний второй refresh. |
+| Hub cache TTL | По умолчанию **120с** (`cacheTtlMs`, мин. 5с). Короткий TTL + ротация давали лишний второй refresh. |
 | Mutex | `navigator.locks`, если есть; иначе mutex на localStorage. |
 | BC sync access | После успешного refresh другие iframe хаба получают `{ type: "access" }` и переиспользуют токен. |
-| Fallback при ошибке | Если сетевой refresh упал, но другая вкладка уже записала кеш — вернуть этот access. |
+| Fallback в хабе | Если сетевой refresh упал, но другая вкладка уже записала кеш хаба — вернуть этот access. |
+| Parent share-cache | Клиент пишет access в `localStorage` родителя (`auth-hub-share-*`, **120с**). Соседние вкладки берут его **до** готовности своего iframe. |
+| Timeout / retries | По умолчанию `timeoutMs` **45с**, `refreshRetries` **3** на transient. После hub timeout iframe уничтожается — `connect()` может смонтировать заново. |
 | Single-flight в клиенте | Параллельные `refresh()` в одной вкладке делят один in-flight promise. |
 
-**Правило для host SPA:** failed refresh **не** должен вызывать серверный logout. Только `clearLocalSession` и при необходимости redirect на login. Hub `logout()` / `authManager.signOut()` — только при **явном** выходе пользователя.
+**Правило для host SPA:** failed refresh **не** должен вызывать серверный logout. `clearLocalSession` + redirect на login — только при definitive auth failure. Hub `logout()` — только при **явном** выходе пользователя.
 
 ## Кастомизация токенов
 

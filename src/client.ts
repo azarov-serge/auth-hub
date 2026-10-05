@@ -29,7 +29,10 @@ export type AuthHubClientOptions = {
   accessToken: AuthHubAccessTokenConfig;
   /** Absolute or relative URL of auth-hub.html (with query config). */
   frameUrl: string;
+  /** postMessage / iframe ready timeout. Default 45s (many tabs → connection queue). */
   timeoutMs?: number;
+  /** Retries for transient hub errors (timeout / network). Default 3. */
+  refreshRetries?: number;
 };
 
 export type BuildAuthHubFrameUrlOptions = {
@@ -76,6 +79,13 @@ type Pending = {
 
 export type AuthHubEventListener = (payload: AuthHubEventPayload) => void;
 
+const DEFAULT_TIMEOUT_MS = 45_000;
+const DEFAULT_REFRESH_RETRIES = 3;
+/** Same-origin tab share: survives before each tab's iframe is ready (connection pool). */
+const SHARE_ACCESS = "auth-hub-share-access";
+const SHARE_AT = "auth-hub-share-at";
+const SHARE_TTL_MS = 120_000;
+
 const requireNonEmpty = (value: string | undefined, name: string): string => {
   const trimmed = value?.trim();
   if (!trimmed) {
@@ -105,11 +115,38 @@ export const buildAuthHubFrameUrl = (
   return url.toString();
 };
 
+const isDefinitiveAuthFailure = (error: unknown): boolean => {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("refresh failed: 401") ||
+    message.includes("refresh failed: empty access")
+  );
+};
+
+const isTransientHubError = (error: unknown): boolean => {
+  if (isDefinitiveAuthFailure(error)) {
+    return false;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("timeout") ||
+    message.includes("hub timeout") ||
+    message.includes("iframe not ready") ||
+    message.includes("refresh failed:") ||
+    message.includes("ERR_NETWORK") ||
+    message.includes("Failed to fetch")
+  );
+};
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
 export class AuthHubClient {
   private readonly accessToken: AuthHubAccessTokenConfig;
   private readonly frameUrl: string;
   private readonly frameOrigin: string;
   private readonly timeoutMs: number;
+  private readonly refreshRetries: number;
 
   private iframe: HTMLIFrameElement | null = null;
   private reqSeq = 0;
@@ -117,6 +154,7 @@ export class AuthHubClient {
   private readonly listeners = new Set<AuthHubEventListener>();
   private ready: Promise<void> | null = null;
   private resolveReady: (() => void) | null = null;
+  private listening = false;
   /** Coalesce concurrent refresh() from the same tab (bootstrap + 401 interceptor). */
   private refreshInflight: Promise<AuthHubRefreshPayload> | null = null;
 
@@ -124,7 +162,8 @@ export class AuthHubClient {
     this.accessToken = options.accessToken;
     this.frameUrl = options.frameUrl;
     this.frameOrigin = new URL(this.frameUrl).origin;
-    this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.refreshRetries = options.refreshRetries ?? DEFAULT_REFRESH_RETRIES;
   }
 
   private readonly onMessage = (event: MessageEvent): void => {
@@ -164,14 +203,38 @@ export class AuthHubClient {
     }
   };
 
-  /** Mounts the hidden iframe and waits for `ready`. Repeat calls return the same promise. */
+  private ensureListener(): void {
+    if (this.listening) {
+      return;
+    }
+    window.addEventListener("message", this.onMessage);
+    this.listening = true;
+  }
+
+  private destroyFrame(): void {
+    for (const [, wait] of this.pending) {
+      clearTimeout(wait.timer);
+      wait.reject(new Error("AuthHubClient: iframe reset"));
+    }
+    this.pending.clear();
+    this.resolveReady = null;
+    this.iframe?.remove();
+    this.iframe = null;
+  }
+
+  /** Mounts the hidden iframe and waits for `ready`. Failed attempts can retry. */
   connect(): Promise<void> {
     if (this.ready) {
       return this.ready;
     }
 
+    this.ensureListener();
+
     this.ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
+        this.resolveReady = null;
+        this.destroyFrame();
+        this.ready = null;
         reject(new Error("AuthHubClient: hub timeout"));
       }, this.timeoutMs);
 
@@ -180,8 +243,6 @@ export class AuthHubClient {
         resolve();
       };
     });
-
-    window.addEventListener("message", this.onMessage);
 
     const iframe = document.createElement("iframe");
     iframe.src = this.frameUrl;
@@ -212,19 +273,87 @@ export class AuthHubClient {
       return this.refreshInflight;
     }
 
-    this.refreshInflight = this.call("refresh")
-      .then((raw) => {
-        const payload = raw as AuthHubRefreshPayload;
+    this.refreshInflight = this.refreshWithRetry().finally(() => {
+      this.refreshInflight = null;
+    });
+
+    return this.refreshInflight;
+  }
+
+  private readShareCache(): string | null {
+    try {
+      const access = localStorage.getItem(SHARE_ACCESS);
+      const at = Number(localStorage.getItem(SHARE_AT) || 0);
+      if (!access || !at || Date.now() - at > SHARE_TTL_MS) {
+        return null;
+      }
+      return access;
+    } catch {
+      return null;
+    }
+  }
+
+  private writeShareCache(access: string): void {
+    try {
+      localStorage.setItem(SHARE_ACCESS, access);
+      localStorage.setItem(SHARE_AT, String(Date.now()));
+    } catch {
+      /* private mode / quota */
+    }
+  }
+
+  private clearShareCache(): void {
+    try {
+      localStorage.removeItem(SHARE_ACCESS);
+      localStorage.removeItem(SHARE_AT);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private async refreshWithRetry(): Promise<AuthHubRefreshPayload> {
+    const shared = this.readShareCache();
+    if (shared) {
+      return { access: shared };
+    }
+
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < this.refreshRetries; attempt++) {
+      try {
+        // Sibling tab may have filled share cache while we waited on iframe/lock.
+        const again = this.readShareCache();
+        if (again) {
+          return { access: again };
+        }
+
+        const payload = (await this.call("refresh")) as AuthHubRefreshPayload;
         if (!payload?.access) {
           throw new Error("AuthHubClient: empty access");
         }
+        this.writeShareCache(payload.access);
         return payload;
-      })
-      .finally(() => {
-        this.refreshInflight = null;
-      });
+      } catch (error) {
+        lastError = error;
+        const afterFail = this.readShareCache();
+        if (afterFail) {
+          return { access: afterFail };
+        }
+        if (isDefinitiveAuthFailure(error)) {
+          this.clearShareCache();
+          throw error;
+        }
+        if (attempt === this.refreshRetries - 1 || !isTransientHubError(error)) {
+          throw error;
+        }
+        // Allow connect() to remount after timeout / reset.
+        await delay(250 * (attempt + 1) + Math.random() * 200);
+      }
+    }
 
-    return this.refreshInflight;
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(String(lastError ?? "AuthHubClient: refresh failed"));
   }
 
   /** POST logout via hub. Always clears local access. */
@@ -232,6 +361,7 @@ export class AuthHubClient {
     try {
       await this.call("logout");
     } finally {
+      this.clearShareCache();
       this.clearLocalSession();
     }
   }
@@ -264,3 +394,5 @@ export class AuthHubClient {
     });
   }
 }
+
+export { isDefinitiveAuthFailure, isTransientHubError };
