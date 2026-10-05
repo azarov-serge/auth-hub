@@ -4,10 +4,10 @@
  * Access tokens are written by the host app; this client only clears the configured storage key.
  */
 
-export const AUTH_HUB_CHANNEL = "auth-hub";
+export const AUTH_HUB_CHANNEL = 'auth-hub';
 
-export type AuthHubCommand = "refresh" | "logout" | "notifyLogin";
-export type AuthHubEventCommand = "ready" | "logout" | "login";
+export type AuthHubCommand = 'refresh' | 'logout' | 'notifyLogin';
+export type AuthHubEventCommand = 'ready' | 'logout' | 'login';
 
 export type AuthHubRefreshPayload = {
   access: string;
@@ -17,7 +17,7 @@ export type AuthHubEventPayload = {
   command: AuthHubEventCommand;
 };
 
-export type AuthHubWebStorageName = "localStorage" | "sessionStorage";
+export type AuthHubWebStorageName = 'localStorage' | 'sessionStorage';
 
 /** Where access lives in the parent SPA (must match what the auth layer writes). */
 export type AuthHubAccessTokenConfig = {
@@ -67,7 +67,7 @@ type HubResponse = {
 /** Push event from the hub (no request id). */
 type HubEventMessage = {
   channel: typeof AUTH_HUB_CHANNEL;
-  type: "event";
+  type: 'event';
   payload: AuthHubEventPayload;
 };
 
@@ -82,8 +82,8 @@ export type AuthHubEventListener = (payload: AuthHubEventPayload) => void;
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_REFRESH_RETRIES = 3;
 /** Same-origin tab share: survives before each tab's iframe is ready (connection pool). */
-const SHARE_ACCESS = "auth-hub-share-access";
-const SHARE_AT = "auth-hub-share-at";
+const SHARE_ACCESS = 'auth-hub-share-access';
+const SHARE_AT = 'auth-hub-share-at';
 const SHARE_TTL_MS = 120_000;
 
 const requireNonEmpty = (value: string | undefined, name: string): string => {
@@ -96,21 +96,21 @@ const requireNonEmpty = (value: string | undefined, name: string): string => {
 
 /** Builds iframe URL with query config expected by `auth-hub.html`. */
 export const buildAuthHubFrameUrl = (
-  options: BuildAuthHubFrameUrlOptions
+  options: BuildAuthHubFrameUrlOptions,
 ): string => {
-  const frameUrl = requireNonEmpty(options.frameUrl, "frameUrl");
-  const apiBase = requireNonEmpty(options.apiBase, "apiBase");
-  const refreshPath = requireNonEmpty(options.refreshPath, "refreshPath");
-  const logoutPath = requireNonEmpty(options.logoutPath, "logoutPath");
+  const frameUrl = requireNonEmpty(options.frameUrl, 'frameUrl');
+  const apiBase = requireNonEmpty(options.apiBase, 'apiBase');
+  const refreshPath = requireNonEmpty(options.refreshPath, 'refreshPath');
+  const logoutPath = requireNonEmpty(options.logoutPath, 'logoutPath');
 
   const url = new URL(frameUrl, window.location.href);
-  url.searchParams.set("apiBase", apiBase);
-  url.searchParams.set("syncLogout", String(options.syncLogout ?? true));
-  url.searchParams.set("parents", options.parents ?? window.location.origin);
-  url.searchParams.set("refreshPath", refreshPath);
-  url.searchParams.set("logoutPath", logoutPath);
+  url.searchParams.set('apiBase', apiBase);
+  url.searchParams.set('syncLogout', String(options.syncLogout ?? true));
+  url.searchParams.set('parents', options.parents ?? window.location.origin);
+  url.searchParams.set('refreshPath', refreshPath);
+  url.searchParams.set('logoutPath', logoutPath);
   if (options.cacheTtlMs != null) {
-    url.searchParams.set("cacheTtlMs", String(options.cacheTtlMs));
+    url.searchParams.set('cacheTtlMs', String(options.cacheTtlMs));
   }
   return url.toString();
 };
@@ -118,8 +118,8 @@ export const buildAuthHubFrameUrl = (
 const isDefinitiveAuthFailure = (error: unknown): boolean => {
   const message = error instanceof Error ? error.message : String(error);
   return (
-    message.includes("refresh failed: 401") ||
-    message.includes("refresh failed: empty access")
+    message.includes('refresh failed: 401') ||
+    message.includes('refresh failed: empty access')
   );
 };
 
@@ -129,12 +129,13 @@ const isTransientHubError = (error: unknown): boolean => {
   }
   const message = error instanceof Error ? error.message : String(error);
   return (
-    message.includes("timeout") ||
-    message.includes("hub timeout") ||
-    message.includes("iframe not ready") ||
-    message.includes("refresh failed:") ||
-    message.includes("ERR_NETWORK") ||
-    message.includes("Failed to fetch")
+    message.includes('timeout') ||
+    message.includes('hub timeout') ||
+    message.includes('iframe not ready') ||
+    message.includes('iframe reset') ||
+    message.includes('refresh failed:') ||
+    message.includes('ERR_NETWORK') ||
+    message.includes('Failed to fetch')
   );
 };
 
@@ -179,8 +180,8 @@ export class AuthHubClient {
       return;
     }
 
-    if (data.type === "event") {
-      if (data.payload?.command === "ready") {
+    if (data.type === 'event') {
+      if (data.payload?.command === 'ready') {
         this.resolveReady?.();
         this.resolveReady = null;
       }
@@ -207,14 +208,14 @@ export class AuthHubClient {
     if (this.listening) {
       return;
     }
-    window.addEventListener("message", this.onMessage);
+    window.addEventListener('message', this.onMessage);
     this.listening = true;
   }
 
   private destroyFrame(): void {
     for (const [, wait] of this.pending) {
       clearTimeout(wait.timer);
-      wait.reject(new Error("AuthHubClient: iframe reset"));
+      wait.reject(new Error('AuthHubClient: iframe reset'));
     }
     this.pending.clear();
     this.resolveReady = null;
@@ -235,7 +236,7 @@ export class AuthHubClient {
         this.resolveReady = null;
         this.destroyFrame();
         this.ready = null;
-        reject(new Error("AuthHubClient: hub timeout"));
+        reject(new Error('AuthHubClient: hub timeout'));
       }, this.timeoutMs);
 
       this.resolveReady = () => {
@@ -244,17 +245,17 @@ export class AuthHubClient {
       };
     });
 
-    const iframe = document.createElement("iframe");
+    const iframe = document.createElement('iframe');
     iframe.src = this.frameUrl;
-    iframe.title = "Auth hub";
-    iframe.setAttribute("aria-hidden", "true");
+    iframe.title = 'Auth hub';
+    iframe.setAttribute('aria-hidden', 'true');
     iframe.tabIndex = -1;
     Object.assign(iframe.style, {
-      position: "fixed",
-      width: "0",
-      height: "0",
-      border: "0",
-      opacity: "0",
+      position: 'fixed',
+      width: '0',
+      height: '0',
+      border: '0',
+      opacity: '0',
     });
     this.iframe = iframe;
     document.body.appendChild(iframe);
@@ -327,9 +328,9 @@ export class AuthHubClient {
           return { access: again };
         }
 
-        const payload = (await this.call("refresh")) as AuthHubRefreshPayload;
+        const payload = (await this.call('refresh')) as AuthHubRefreshPayload;
         if (!payload?.access) {
-          throw new Error("AuthHubClient: empty access");
+          throw new Error('AuthHubClient: empty access');
         }
         this.writeShareCache(payload.access);
         return payload;
@@ -343,7 +344,10 @@ export class AuthHubClient {
           this.clearShareCache();
           throw error;
         }
-        if (attempt === this.refreshRetries - 1 || !isTransientHubError(error)) {
+        if (
+          attempt === this.refreshRetries - 1 ||
+          !isTransientHubError(error)
+        ) {
           throw error;
         }
         // Allow connect() to remount after timeout / reset.
@@ -353,13 +357,13 @@ export class AuthHubClient {
 
     throw lastError instanceof Error
       ? lastError
-      : new Error(String(lastError ?? "AuthHubClient: refresh failed"));
+      : new Error(String(lastError ?? 'AuthHubClient: refresh failed'));
   }
 
   /** POST logout via hub. Always clears local access. */
   async logout(): Promise<void> {
     try {
-      await this.call("logout");
+      await this.call('logout');
     } finally {
       this.clearShareCache();
       this.clearLocalSession();
@@ -368,7 +372,7 @@ export class AuthHubClient {
 
   /** Fan-out login to other tabs/SPAs when syncLogout is enabled on the hub. */
   notifyLogin(): Promise<void> {
-    return this.call("notifyLogin").then(() => undefined);
+    return this.call('notifyLogin').then(() => undefined);
   }
 
   clearLocalSession(): void {
@@ -379,7 +383,7 @@ export class AuthHubClient {
     await this.connect();
     const win = this.iframe?.contentWindow;
     if (!win) {
-      throw new Error("AuthHubClient: iframe not ready");
+      throw new Error('AuthHubClient: iframe not ready');
     }
 
     const id = String(++this.reqSeq);
@@ -390,7 +394,10 @@ export class AuthHubClient {
       }, this.timeoutMs);
 
       this.pending.set(id, { resolve, reject, timer });
-      win.postMessage({ channel: AUTH_HUB_CHANNEL, id, type }, this.frameOrigin);
+      win.postMessage(
+        { channel: AUTH_HUB_CHANNEL, id, type },
+        this.frameOrigin,
+      );
     });
   }
 }

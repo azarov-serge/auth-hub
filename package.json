@@ -1,6 +1,6 @@
 {
   "name": "auth-hub",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Hidden iframe auth hub: cross-origin refresh mutex (Web Locks), logout/login fan-out (BroadcastChannel), postMessage client",
   "license": "MIT",
   "type": "module",
